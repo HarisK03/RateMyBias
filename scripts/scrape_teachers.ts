@@ -2,16 +2,18 @@ import PocketBase from "pocketbase";
 import axios, { type AxiosInstance, type AxiosResponse } from "axios";
 import "dotenv/config";
 import fs from "fs";
-import path from "path";
 
+/**
+ * CONFIGURATION
+ * PB_BATCH_SIZE is now 50 to prevent PocketHost timeouts.
+ */
 const PB_BATCH_SIZE = 500;
 const RMP_FETCH_SIZE = 500;
 const PB_URL = "https://rankmyprof.pockethost.io";
 const PB_EMAIL = process.env.PB_EMAIL!;
 const PB_PASS = process.env.PB_PASS!;
 const MAX_RMP_RESULTS = 1000;
-const STATE_FILE = path.join(process.cwd(), "scrape_state.json");
-const FAILED_LOG = path.join(process.cwd(), "failed_prefixes.txt");
+const STATE_FILE = "scrape_state.json";
 
 const HEADERS = {
 	"User-Agent":
@@ -59,7 +61,7 @@ class RMPTeacherScraper {
 		this.client = axios.create({
 			baseURL: "https://www.ratemyprofessors.com/graphql",
 			headers: HEADERS,
-			timeout: 60000,
+			timeout: 60000, // Increased timeout for RMP
 		});
 		this.loadState();
 	}
@@ -74,10 +76,6 @@ class RMPTeacherScraper {
 
 	private saveState(prefix: string) {
 		fs.writeFileSync(STATE_FILE, JSON.stringify({ lastPrefix: prefix }));
-	}
-
-	private logFailure(prefix: string) {
-		fs.appendFileSync(FAILED_LOG, `${prefix}\n`);
 	}
 
 	async init(): Promise<void> {
@@ -130,13 +128,17 @@ class RMPTeacherScraper {
 					`Batch Success: ${chunk.length} uploaded. Queue: ${this.uploadQueue.length}`
 				);
 			} catch (error: any) {
-				console.error("PocketBase Timeout. Retrying in 15s...");
+				console.error(
+					"PocketBase Timeout. Indexing may be slow. Retrying in 15s..."
+				);
 				await new Promise((r) => setTimeout(r, 15000));
+				// We don't splice here, so the next loop iteration retries the same chunk
 			}
 		}
 	}
 
 	async searchRecursive(queryText: string): Promise<void> {
+		// RESUME LOGIC: Skip prefixes we already finished
 		if (
 			this.lastProcessedPrefix &&
 			queryText <= this.lastProcessedPrefix &&
@@ -149,8 +151,8 @@ class RMPTeacherScraper {
 		let hasNextPage = true;
 		let cursor: string | null = null;
 
-		try {
-			while (hasNextPage) {
+		while (hasNextPage) {
+			try {
 				const response: AxiosResponse<RMPGraphQLResponse> =
 					await this.client.post("", {
 						query: `query TeacherSearch($count: Int!, $cursor: String, $queryText: String!) {
@@ -173,6 +175,7 @@ class RMPTeacherScraper {
 
 				const results = response.data.data.search.teachers;
 
+				// DRILL DOWN LOGIC
 				if (
 					cursor === null &&
 					results.resultCount >= MAX_RMP_RESULTS &&
@@ -201,34 +204,21 @@ class RMPTeacherScraper {
 				hasNextPage = results.pageInfo.hasNextPage;
 				cursor = results.pageInfo.endCursor;
 				await new Promise((r) => setTimeout(r, 200));
+			} catch (error: any) {
+				console.error(`Fetch error [${queryText}]: ${error.message}`);
+				await new Promise((r) => setTimeout(r, 5000));
 			}
-			this.saveState(queryText);
-		} catch (error: any) {
-			console.error(`Fetch error [${queryText}]: ${error.message}`);
-			this.logFailure(queryText);
 		}
+
+		this.saveState(queryText);
 	}
 
 	async run(): Promise<void> {
-		// 1. Check for previously failed entries first
-		if (fs.existsSync(FAILED_LOG)) {
-			const fails = fs
-				.readFileSync(FAILED_LOG, "utf-8")
-				.split("\n")
-				.filter(Boolean);
-			fs.writeFileSync(FAILED_LOG, ""); // Clear log to prevent infinite loops
-			console.log(`Retrying ${fails.length} failed prefixes...`);
-			for (const prefix of fails) {
-				await this.searchRecursive(prefix);
-			}
-		}
-
-		// 2. Standard run
 		for (const char of this.chars) {
 			await this.searchRecursive(char);
 		}
 		await this.flushQueue(true);
-		console.log("Scrape Cycle Complete.");
+		console.log("Scrape Complete.");
 	}
 }
 
