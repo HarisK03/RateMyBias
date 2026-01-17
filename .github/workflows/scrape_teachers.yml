@@ -1,0 +1,40 @@
+name: RMP Daily Teacher Scrape
+
+on:
+    schedule:
+        - cron: "0 */6 * * *" # Every 6 hours
+    workflow_dispatch: # Manual trigger
+
+jobs:
+    scrape:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 20
+                  cache: "npm"
+
+            - name: Install dependencies
+              run: npm install
+
+            - name: Run Scraper
+              env:
+                  PB_EMAIL: ${{ secrets.PB_EMAIL }}
+                  PB_PASS: ${{ secrets.PB_PASS }}
+              run: npx ts-node scripts/scraper.ts
+
+            - name: Commit and Push State Changes
+              if: always()
+              run: |
+                  git config --global user.name "github-actions[bot]"
+                  git config --global user.email "github-actions[bot]@users.noreply.github.com"
+                  git add scrape_state.json failed_prefixes.txt || true
+                  git commit -m "chore: update scrape state and logs [skip ci]" || echo "No changes"
+                  git push
